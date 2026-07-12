@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Affichage de données</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --accent: #2b6cb0;
+    --text: #1a202c;
+    --muted: #6b7280;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 20px 30px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.5rem;
+  }
+  .layout {
+    display: flex;
+    gap: 20px;
+    padding: 20px;
+    align-items: flex-start;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .left {
+    width: 280px;
+    flex-shrink: 0;
+  }
+  .right {
+    flex: 1;
+    min-height: 500px;
+    display: flex;
+    flex-direction: column;
+  }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 6px;
+    margin-top: 18px;
+    font-weight: 600;
+  }
+  label:first-child { margin-top: 0; }
+  select, input[type="file"] {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #fff;
+    font-size: 0.9rem;
+  }
+  input[type="file"] {
+    padding: 8px 6px;
+  }
+  .status {
+    margin-top: 16px;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .chart-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 450px;
+  }
+  .placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--muted);
+    font-size: 0.95rem;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Affichage de données</h1>
+</header>
+
+<div class="layout">
+  <div class="panel left">
+    <label for="fileInput">Fichier (.csv ou .txt)</label>
+    <input type="file" id="fileInput" accept=".csv,.txt">
+
+    <label for="xSelect">Axe des abscisses (X)</label>
+    <select id="xSelect" disabled>
+      <option>-- importer un fichier --</option>
+    </select>
+
+    <label for="ySelect">Axe des ordonnées (Y)</label>
+    <select id="ySelect" disabled>
+      <option>-- importer un fichier --</option>
+    </select>
+
+    <div class="status" id="status">Aucun fichier chargé.</div>
+  </div>
+
+  <div class="panel right">
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div class="placeholder" id="placeholder">Le graphique apparaîtra ici une fois un fichier importé.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let parsedData = [];
+let columns = [];
+let chartInstance = null;
+
+const fileInput = document.getElementById('fileInput');
+const xSelect = document.getElementById('xSelect');
+const ySelect = document.getElementById('ySelect');
+const statusEl = document.getElementById('status');
+const placeholder = document.getElementById('placeholder');
+const canvas = document.getElementById('chart');
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  statusEl.textContent = 'Lecture du fichier...';
+
+  Papa.parse(file, {
+    header: true,
+    dynamicTyping: true,
+    skipEmptyLines: true,
+    delimitersToGuess: [',', '\t', ';', '|'],
+    complete: (results) => {
+      parsedData = results.data;
+      columns = results.meta.fields || [];
+
+      if (!columns.length || !parsedData.length) {
+        statusEl.textContent = 'Impossible de détecter des colonnes dans ce fichier.';
+        return;
+      }
+
+      populateSelect(xSelect, columns);
+      populateSelect(ySelect, columns);
+      xSelect.disabled = false;
+      ySelect.disabled = false;
+
+      // Choix par défaut : première et deuxième colonne
+      xSelect.value = columns[0];
+      ySelect.value = columns.length > 1 ? columns[1] : columns[0];
+
+      statusEl.textContent = `${parsedData.length} lignes, ${columns.length} colonnes détectées.`;
+      drawChart();
+    },
+    error: (err) => {
+      statusEl.textContent = 'Erreur de lecture : ' + err.message;
+    }
+  });
+});
+
+function populateSelect(select, cols) {
+  select.innerHTML = '';
+  cols.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c;
+    opt.textContent = c;
+    select.appendChild(opt);
+  });
+}
+
+xSelect.addEventListener('change', drawChart);
+ySelect.addEventListener('change', drawChart);
+
+// Détecte si une colonne contient des dates plutôt que des nombres
+function isDateColumn(colName) {
+  const sample = parsedData.slice(0, 20).map(r => r[colName]);
+  let dateLike = 0;
+  sample.forEach(v => {
+    if (v === null || v === undefined || v === '') return;
+    if (typeof v === 'number') return;
+    const d = new Date(v);
+    if (!isNaN(d.getTime())) dateLike++;
+  });
+  return dateLike > sample.length / 2;
+}
+
+function drawChart() {
+  const xCol = xSelect.value;
+  const yCol = ySelect.value;
+  if (!xCol || !yCol) return;
+
+  placeholder.style.display = 'none';
+
+  const xIsDate = isDateColumn(xCol);
+
+  const points = parsedData
+    .filter(row => row[xCol] !== null && row[xCol] !== undefined && row[yCol] !== null && row[yCol] !== undefined)
+    .map(row => {
+      let xVal = row[xCol];
+      if (xIsDate) xVal = new Date(xVal);
+      return { x: xVal, y: row[yCol] };
+    });
+
+  // Tri par X pour un tracé cohérent (utile surtout pour les séries temporelles)
+  points.sort((a, b) => {
+    if (xIsDate) return a.x - b.x;
+    return a.x - b.x;
+  });
+
+  if (chartInstance) {
+    chartInstance.destroy();
+  }
+
+  chartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: `${yCol} en fonction de ${xCol}`,
+        data: points,
+        borderColor: '#2b6cb0',
+        backgroundColor: 'rgba(43,108,176,0.15)',
+        pointRadius: 3,
+        tension: 0.15,
+        fill: false
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          type: xIsDate ? 'time' : 'linear',
+          title: { display: true, text: xCol }
+        },
+        y: {
+          title: { display: true, text: yCol }
+        }
+      },
+      plugins: {
+        legend: { display: true }
+      }
+    }
+  });
+}
+</script>
+
+</body>
+</html>
