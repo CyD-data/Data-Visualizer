@@ -7,6 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-date-fns/3.0.0/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-zoom/2.0.1/chartjs-plugin-zoom.min.js"></script>
 <style>
   :root {
     --bg: #f4f5f7;
@@ -27,6 +28,9 @@
     padding: 20px 30px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
   h1 {
     margin: 0;
@@ -93,32 +97,91 @@
     font-size: 0.95rem;
     text-align: center;
   }
+  .checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .checklist-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.88rem;
+  }
+  .checklist-item input {
+    width: auto;
+    accent-color: var(--accent);
+  }
+  .checklist-item .swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .toolbar button {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .toolbar button:hover { background: #f0f2f5; }
+  .reset-zoom {
+    margin-top: 10px;
+    padding: 8px 10px;
+    font-size: 0.82rem;
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+    width: 100%;
+  }
+  .reset-zoom:hover { background: #f0f2f5; }
+  .hint {
+    margin-top: 10px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
 </style>
 </head>
 <body>
-
 <header>
   <h1>Affichage de données</h1>
 </header>
-
 <div class="layout">
   <div class="panel left">
     <label for="fileInput">Fichier (.csv ou .txt)</label>
-    <input type="file" id="fileInput" accept=".csv,.txt">
-
+    <input type="file" id="fileInput" accept=".csv,.txt,.tsv">
     <label for="xSelect">Axe des abscisses (X)</label>
     <select id="xSelect" disabled>
       <option>-- importer un fichier --</option>
     </select>
-
-    <label for="ySelect">Axe des ordonnées (Y)</label>
-    <select id="ySelect" disabled>
-      <option>-- importer un fichier --</option>
-    </select>
-
+    <label>Canaux à afficher (Y)</label>
+    <div class="checklist" id="yChecklist">
+      <div class="checklist-item" style="color: var(--muted);">-- importer un fichier --</div>
+    </div>
+    <div class="toolbar">
+      <button id="selectAll" type="button">Tout cocher</button>
+      <button id="selectNone" type="button">Tout décocher</button>
+    </div>
+    <button class="reset-zoom" id="resetZoom" type="button">Réinitialiser le zoom</button>
     <div class="status" id="status">Aucun fichier chargé.</div>
+    <div class="hint">Molette = zoom, clic-glisser = déplacement (pan).</div>
   </div>
-
   <div class="panel right">
     <div class="chart-wrap">
       <canvas id="chart"></canvas>
@@ -126,48 +189,104 @@
     </div>
   </div>
 </div>
-
 <script>
 let parsedData = [];
 let columns = [];
 let chartInstance = null;
-
 const fileInput = document.getElementById('fileInput');
 const xSelect = document.getElementById('xSelect');
-const ySelect = document.getElementById('ySelect');
+const yChecklist = document.getElementById('yChecklist');
 const statusEl = document.getElementById('status');
 const placeholder = document.getElementById('placeholder');
 const canvas = document.getElementById('chart');
+const resetZoomBtn = document.getElementById('resetZoom');
+const selectAllBtn = document.getElementById('selectAll');
+const selectNoneBtn = document.getElementById('selectNone');
+
+const PALETTE = [
+  '#2b6cb0', '#dd6b20', '#38a169', '#d53f8c',
+  '#805ad5', '#d69e2e', '#319795', '#e53e3e',
+  '#3182ce', '#718096'
+];
+
+// Détecte si la première ligne du fichier est un en-tête textuel
+// ou déjà une ligne de données numériques.
+function looksLikeHeader(firstRow) {
+  if (!firstRow || !firstRow.length) return false;
+  let numericCount = 0;
+  firstRow.forEach(cell => {
+    const v = (cell || '').toString().trim();
+    if (v !== '' && !isNaN(Number(v))) numericCount++;
+  });
+  // Si la quasi-totalité de la première ligne est numérique, ce n'est pas un en-tête.
+  return numericCount < firstRow.length * 0.5;
+}
 
 fileInput.addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
   statusEl.textContent = 'Lecture du fichier...';
-
   Papa.parse(file, {
-    header: true,
-    dynamicTyping: true,
+    header: false,
+    dynamicTyping: false,
     skipEmptyLines: true,
     delimitersToGuess: [',', '\t', ';', '|'],
     complete: (results) => {
-      parsedData = results.data;
-      columns = results.meta.fields || [];
-
-      if (!columns.length || !parsedData.length) {
+      const rows = results.data;
+      if (!rows.length) {
+        statusEl.textContent = 'Fichier vide ou illisible.';
+        return;
+      }
+      const hasHeader = looksLikeHeader(rows[0]);
+      let headerRow, dataRows;
+      if (hasHeader) {
+        headerRow = rows[0];
+        dataRows = rows.slice(1);
+      } else {
+        headerRow = null;
+        dataRows = rows;
+      }
+      const nCols = dataRows[0] ? dataRows[0].length : 0;
+      if (!nCols) {
         statusEl.textContent = 'Impossible de détecter des colonnes dans ce fichier.';
         return;
       }
+      // Construction des noms de colonnes
+      columns = [];
+      for (let i = 0; i < nCols; i++) {
+        if (headerRow && headerRow[i] !== undefined && headerRow[i].toString().trim() !== '') {
+          columns.push(headerRow[i].toString().trim());
+        } else if (i === 0) {
+          columns.push('X');
+        } else {
+          columns.push('Colonne ' + i);
+        }
+      }
+      // Conversion des données en objets {colName: value}
+      parsedData = dataRows
+        .filter(r => r.length === nCols)
+        .map(r => {
+          const obj = {};
+          columns.forEach((c, i) => {
+            const raw = r[i];
+            const num = Number(raw);
+            obj[c] = raw !== '' && !isNaN(num) ? num : raw;
+          });
+          return obj;
+        });
 
-      populateSelect(xSelect, columns);
-      populateSelect(ySelect, columns);
+      if (!parsedData.length) {
+        statusEl.textContent = 'Aucune ligne de données valide trouvée.';
+        return;
+      }
+
+      populateXSelect(columns);
+      populateYChecklist(columns);
       xSelect.disabled = false;
-      ySelect.disabled = false;
-
-      // Choix par défaut : première et deuxième colonne
       xSelect.value = columns[0];
-      ySelect.value = columns.length > 1 ? columns[1] : columns[0];
 
-      statusEl.textContent = `${parsedData.length} lignes, ${columns.length} colonnes détectées.`;
+      const modeTxt = hasHeader ? 'en-tête détecté' : 'pas d\'en-tête, colonnes nommées automatiquement';
+      statusEl.textContent = `${parsedData.length} lignes, ${columns.length} colonnes (${modeTxt}).`;
       drawChart();
     },
     error: (err) => {
@@ -176,18 +295,62 @@ fileInput.addEventListener('change', (e) => {
   });
 });
 
-function populateSelect(select, cols) {
-  select.innerHTML = '';
+function populateXSelect(cols) {
+  xSelect.innerHTML = '';
   cols.forEach(c => {
     const opt = document.createElement('option');
     opt.value = c;
     opt.textContent = c;
-    select.appendChild(opt);
+    xSelect.appendChild(opt);
+  });
+}
+
+function populateYChecklist(cols) {
+  yChecklist.innerHTML = '';
+  // Par défaut, on coche toutes les colonnes sauf la première (X)
+  cols.forEach((c, i) => {
+    if (i === 0) return; // on ne propose pas X comme canal Y
+    const item = document.createElement('div');
+    item.className = 'checklist-item';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = PALETTE[(i - 1) % PALETTE.length];
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = c;
+    checkbox.checked = true;
+    checkbox.id = 'y_' + i;
+    checkbox.addEventListener('change', drawChart);
+
+    const label = document.createElement('label');
+    label.htmlFor = checkbox.id;
+    label.style.margin = '0';
+    label.style.fontWeight = '400';
+    label.style.color = 'var(--text)';
+    label.textContent = c;
+
+    item.appendChild(checkbox);
+    item.appendChild(swatch);
+    item.appendChild(label);
+    yChecklist.appendChild(item);
   });
 }
 
 xSelect.addEventListener('change', drawChart);
-ySelect.addEventListener('change', drawChart);
+
+selectAllBtn.addEventListener('click', () => {
+  yChecklist.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+  drawChart();
+});
+selectNoneBtn.addEventListener('click', () => {
+  yChecklist.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+  drawChart();
+});
+resetZoomBtn.addEventListener('click', () => {
+  if (chartInstance) chartInstance.resetZoom();
+});
 
 // Détecte si une colonne contient des dates plutôt que des nombres
 function isDateColumn(colName) {
@@ -202,65 +365,82 @@ function isDateColumn(colName) {
   return dateLike > sample.length / 2;
 }
 
+function getSelectedYColumns() {
+  return Array.from(yChecklist.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+}
+
 function drawChart() {
   const xCol = xSelect.value;
-  const yCol = ySelect.value;
-  if (!xCol || !yCol) return;
-
+  const yCols = getSelectedYColumns();
+  if (!xCol || !yCols.length) {
+    if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+    placeholder.style.display = 'flex';
+    placeholder.textContent = yCols.length ? 'Sélectionnez un axe X.' : 'Sélectionnez au moins un canal à afficher.';
+    return;
+  }
   placeholder.style.display = 'none';
-
   const xIsDate = isDateColumn(xCol);
 
-  const points = parsedData
-    .filter(row => row[xCol] !== null && row[xCol] !== undefined && row[yCol] !== null && row[yCol] !== undefined)
-    .map(row => {
-      let xVal = row[xCol];
-      if (xIsDate) xVal = new Date(xVal);
-      return { x: xVal, y: row[yCol] };
-    });
+  const allCols = Array.from(yChecklist.querySelectorAll('input[type="checkbox"]')).map(cb => cb.value);
 
-  // Tri par X pour un tracé cohérent (utile surtout pour les séries temporelles)
-  points.sort((a, b) => {
-    if (xIsDate) return a.x - b.x;
-    return a.x - b.x;
+  const datasets = yCols.map(yCol => {
+    const colorIdx = allCols.indexOf(yCol);
+    const color = PALETTE[colorIdx % PALETTE.length];
+    const points = parsedData
+      .filter(row => row[xCol] !== null && row[xCol] !== undefined && row[yCol] !== null && row[yCol] !== undefined)
+      .map(row => {
+        let xVal = row[xCol];
+        if (xIsDate) xVal = new Date(xVal);
+        return { x: xVal, y: row[yCol] };
+      })
+      .sort((a, b) => a.x - b.x);
+    return {
+      label: yCol,
+      data: points,
+      borderColor: color,
+      backgroundColor: color + '26',
+      pointRadius: 0,
+      borderWidth: 1.5,
+      tension: 0.1,
+      fill: false
+    };
   });
 
   if (chartInstance) {
     chartInstance.destroy();
   }
-
   chartInstance = new Chart(canvas, {
     type: 'line',
-    data: {
-      datasets: [{
-        label: `${yCol} en fonction de ${xCol}`,
-        data: points,
-        borderColor: '#2b6cb0',
-        backgroundColor: 'rgba(43,108,176,0.15)',
-        pointRadius: 3,
-        tension: 0.15,
-        fill: false
-      }]
-    },
+    data: { datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      animation: false,
+      interaction: { mode: 'nearest', axis: 'x', intersect: false },
       scales: {
         x: {
           type: xIsDate ? 'time' : 'linear',
           title: { display: true, text: xCol }
         },
         y: {
-          title: { display: true, text: yCol }
+          title: { display: true, text: yCols.length === 1 ? yCols[0] : 'Signal' }
         }
       },
       plugins: {
-        legend: { display: true }
+        legend: { display: true },
+        zoom: {
+          pan: { enabled: true, mode: 'xy' },
+          zoom: {
+            wheel: { enabled: true },
+            pinch: { enabled: true },
+            drag: { enabled: false },
+            mode: 'xy'
+          }
+        }
       }
     }
   });
 }
 </script>
-
 </body>
 </html>
